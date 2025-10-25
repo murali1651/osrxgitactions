@@ -38,7 +38,7 @@ jobs:
           ORG_ID: 6555a347-8bc4-4f41-986e-76a35def9b0a
           ENV_NAME: "Development"
           ENV_TYPE: "sandbox"
-          APP_NAME: "your-app-name" # 🔁 change this to your Mule app name
+          APP_NAME: "your-app-name" # 🔁 Change this to your Mule app name
         run: |
           echo "🔐 Authenticating to Anypoint Platform..."
           TOKEN=$(curl -s -X POST https://anypoint.mulesoft.com/accounts/login \
@@ -53,48 +53,73 @@ jobs:
           echo "✅ Authenticated successfully."
           echo "🌍 Finding environment: $ENV_NAME ($ENV_TYPE)"
 
-          # Find Environment ID by name and type
-          ENV_ID=$(curl -s -X GET "https://anypoint.mulesoft.com/accounts/api/organizations/$ORG_ID/environments" \
-            -H "Authorization: Bearer $TOKEN" | jq -r ".data[] | select(.name==\"$ENV_NAME\" and .type==\"$ENV_TYPE\") | .id")
+          # ✅ Fetch all environments
+          RESPONSE=$(curl -s -X GET \
+            "https://anypoint.mulesoft.com/accounts/api/organizations/$ORG_ID/environments" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/json")
 
-          if [ -z "$ENV_ID" ]; then
-            echo "❌ Environment $ENV_NAME ($ENV_TYPE) not found in organization $ORG_ID"
+          # ✅ Ensure valid JSON
+          if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
+            echo "❌ Invalid response from environment API"
+            echo "$RESPONSE"
+            exit 1
+          fi
+
+          # ✅ Extract environment ID
+          ENV_ID=$(echo "$RESPONSE" | jq -r ".data[] | select(.name==\"$ENV_NAME\" and .type==\"$ENV_TYPE\") | .id")
+
+          if [ -z "$ENV_ID" ] || [ "$ENV_ID" == "null" ]; then
+            echo "❌ Environment '$ENV_NAME' (type: $ENV_TYPE) not found."
+            echo "Available environments:"
+            echo "$RESPONSE" | jq -r '.data[] | {name, type, id}'
             exit 1
           fi
 
           echo "✅ Found environment ID: $ENV_ID"
 
-          # Get CloudHub 2.0 Target (Shared Space)
+          # ✅ Fetch CloudHub 2.0 Shared Space
           echo "🔍 Fetching CloudHub 2.0 targets..."
-          TARGETS=$(curl -s -X GET "https://anypoint.mulesoft.com/runtimefabric/api/organizations/$ORG_ID/environments/$ENV_ID/targets" \
-            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json")
+          TARGETS=$(curl -s -X GET \
+            "https://anypoint.mulesoft.com/runtimefabric/api/organizations/$ORG_ID/environments/$ENV_ID/targets" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json")
 
+          # Handle 403 Forbidden or invalid JSON
           if echo "$TARGETS" | grep -q '"status":403'; then
             echo "❌ Forbidden (403): Missing permissions to access CloudHub 2.0 targets."
-            echo "   👉 Please ensure your user has 'CloudHub Admin' or 'Runtime Manager Deployer' roles."
+            echo "👉 Ensure your user has 'CloudHub Admin' or 'Runtime Manager Deployer' role."
             exit 1
           fi
 
-          SHARED_SPACE_ID=$(echo "$TARGETS" | jq -r '.[] | select(.isShared==true) | .id')
-
-          if [ -z "$SHARED_SPACE_ID" ]; then
-            echo "❌ Could not find CloudHub 2.0 Shared Space for environment $ENV_NAME."
+          if ! echo "$TARGETS" | jq empty 2>/dev/null; then
+            echo "❌ Invalid response from targets API:"
             echo "$TARGETS"
             exit 1
           fi
 
-          echo "✅ Found CloudHub 2.0 Shared Space: $SHARED_SPACE_ID"
+          # ✅ Find shared space ID
+          SHARED_SPACE_ID=$(echo "$TARGETS" | jq -r '.[] | select(.isShared==true) | .id' | head -1)
 
-          # Locate built artifact (JAR)
+          if [ -z "$SHARED_SPACE_ID" ] || [ "$SHARED_SPACE_ID" == "null" ]; then
+            echo "❌ Could not find CloudHub 2.0 Shared Space for environment $ENV_NAME."
+            echo "Available targets:"
+            echo "$TARGETS" | jq -r '.[] | {id, name, provider, isShared}'
+            exit 1
+          fi
+
+          echo "✅ Found CloudHub 2.0 Shared Space ID: $SHARED_SPACE_ID"
+
+          # ✅ Locate built artifact
           ARTIFACT_PATH=$(find target -name "*.jar" | head -n 1)
           if [ -z "$ARTIFACT_PATH" ]; then
             echo "❌ No Mule JAR found in target directory."
             exit 1
           fi
-
           echo "📦 Artifact found: $ARTIFACT_PATH"
 
-          # Prepare deployment payload
+          # ✅ Prepare deployment configuration JSON
           DEPLOY_PAYLOAD=$(jq -n \
             --arg name "$APP_NAME" \
             --arg targetId "$SHARED_SPACE_ID" \
@@ -104,12 +129,12 @@ jobs:
             '{name: $name, target: {targetId: $targetId}, desiredReplicas: $replicas, desiredSize: $vCores, muleVersion: {version: $runtimeVersion}, persistentQueues: false, clustered: false}'
           )
 
-          echo "🚀 Deploying application $APP_NAME to CloudHub 2.0 (Development)..."
-
+          echo "🚀 Deploying application $APP_NAME to CloudHub 2.0 (Development - Sandbox)..."
           RESPONSE=$(curl -s -X POST "https://anypoint.mulesoft.com/cloudhub/api/v2/applications" \
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
             -d "$DEPLOY_PAYLOAD")
 
           echo "✅ Deployment request submitted."
-          echo "Response: $RESPONSE"
+          echo "Response:"
+          echo "$RESPONSE" | jq '.'
